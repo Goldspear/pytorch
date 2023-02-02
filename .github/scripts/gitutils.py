@@ -4,10 +4,12 @@ import json
 import os
 import re
 import tempfile
+from dataclasses import dataclass
 from collections import defaultdict
 from datetime import datetime
 from functools import lru_cache
-from typing import cast, Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import cast, Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
+from urllib.error import HTTPError
 from urllib.request import urlopen, Request
 
 
@@ -46,6 +48,16 @@ def _check_output(items: List[str], encoding: str = "utf-8") -> str:
         else:
             msg += f"\nstdout:\n```\n{stdout}```\nstderr:\n```\n{stderr}```"
         raise RuntimeError(msg) from e
+
+
+@dataclass
+class GitHubComment:
+    body_text: str
+    created_at: str
+    author_login: str
+    author_association: str
+    editor_login: Optional[str]
+    database_id: int
 
 
 class GitCommit:
@@ -393,3 +405,28 @@ def gh_get_labels(org: str, repo: str) -> List[str]:
         update_labels(labels, info)
 
     return labels
+
+def gh_fetch_url(
+    url: str, *,
+    headers: Optional[Dict[str, str]] = None,
+    data: Optional[Dict[str, Any]] = None,
+    method: Optional[str] = None,
+    reader: Callable[[Any], Any] = lambda x: x.read(),
+) -> Any:
+    if headers is None:
+        headers = {}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token is not None and url.startswith('https://api.github.com/'):
+        headers['Authorization'] = f'token {token}'
+    data_ = json.dumps(data).encode() if data is not None else None
+    try:
+        with urlopen(Request(url, headers=headers, data=data_, method=method)) as conn:
+            return reader(conn)
+    except HTTPError as err:
+        if err.code == 403 and all(key in err.headers for key in ['X-RateLimit-Limit', 'X-RateLimit-Used']):
+            print(f"Rate limit exceeded: {err.headers['X-RateLimit-Used']}/{err.headers['X-RateLimit-Limit']}")
+        raise
+
+def gh_post_delete_comment(org: str, project: str, comment_id: int) -> None:
+    url = f"https://api.github.com/repos/{org}/{project}/issues/comments/{comment_id}"
+    gh_fetch_url(url, method="DELETE")
